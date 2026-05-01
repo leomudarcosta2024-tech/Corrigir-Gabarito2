@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Scanner de Gabarito (Foto)</title>
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="cvPronto();" type="text/javascript"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; background-color: #222; color: #fff; margin: 0; padding: 10px; overflow-x: hidden; }
+        #config-painel { background-color: #333; padding: 15px; border-radius: 8px; margin: 10px auto; max-width: 90%; }
+        #inputGabarito { padding: 10px; font-size: 16px; border-radius: 4px; border: 1px solid #555; width: 80%; max-width: 250px; text-align: center; text-transform: uppercase; margin-bottom: 15px; }
+        
+        /* Estilo da nova barra de sensibilidade */
+        .slider-container { margin-top: 10px; text-align: left; padding: 0 10%; }
+        .slider-container label { font-size: 14px; color: #ccc; display: flex; justify-content: space-between;}
+        input[type=range] { width: 100%; margin-top: 8px; }
+
+        #video-container { position: relative; margin: 0 auto; width: 100%; max-width: 600px; }
+        video { display: none; } 
+        canvas { width: 100%; height: auto; border-radius: 8px; border: 2px solid #555; background-color: #000; }
+        
+        .controles { margin-top: 15px; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+        .btn { padding: 12px 20px; font-size: 16px; font-weight: bold; background-color: #007bff; color: white; border: none; border-radius: 8px; cursor: pointer; }
+        .btn:disabled { background-color: #555; color: #888; }
+        .btn-start { background-color: #28a745; }
+        .btn-stop { background-color: #dc3545; }
+        
+        .btn-foto { background-color: #ff9800; color: #000; display: none; font-size: 18px; padding: 15px 25px; width: 90%; max-width: 300px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .btn-nova { background-color: #17a2b8; display: none; font-size: 18px; padding: 15px 25px; width: 90%; max-width: 300px; }
+
+        #resultado { margin-top: 15px; padding: 15px; background-color: #333; border-radius: 8px; font-size: 16px; text-align: left; margin: 10px auto; max-width: 90%; word-wrap: break-word;}
+        .res-item { padding: 8px; border-bottom: 1px solid #555; display: flex; justify-content: space-between; }
+        .correto { color: #00ff00; font-weight: bold; }
+        .errado { color: #ff4444; font-weight: bold; }
+        .anulada { color: #ffcc00; font-weight: bold; }
+        .placar { font-size: 24px; font-weight: bold; color: #00ff00; text-align: center; margin-top: 15px; padding-top: 10px; border-top: 2px solid #555; }
+    </style>
+</head>
+<body>
+
+    <h2>Scanner de Gabarito</h2>
+    
+    <div id="config-painel">
+        <label><strong>Gabarito Oficial (10 Questões):</strong></label><br>
+        <input type="text" id="inputGabarito" placeholder="ABCDABCDAA" maxlength="10">
+        
+        <div class="slider-container">
+            <label>
+                <span>Ignorar sujeiras (Rigor)</span>
+                <span id="valorSensibilidade">25%</span>
+            </label>
+            <input type="range" id="inputSensibilidade" min="0.10" max="0.60" step="0.05" value="0.25">
+        </div>
+    </div>
+
+    <p style="font-size: 14px; color: #ccc;">Aperte o botão quando o gabarito estiver no quadrado verde.</p>
+    
+    <div class="controles">
+        <button id="btnCamera" class="btn" disabled>Aguardando OpenCV...</button>
+    </div>
+
+    <div id="video-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <div class="controles">
+        <button id="btnTirarFoto" class="btn btn-foto">📸 Tirar Foto e Corrigir</button>
+        <button id="btnNovaFoto" class="btn btn-nova">🔄 Tentar Novamente</button>
+    </div>
+
+    <div id="resultado">Posicione o celular sobre o gabarito.</div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        
+        const btnCamera = document.getElementById('btnCamera');
+        const btnTirarFoto = document.getElementById('btnTirarFoto');
+        const btnNovaFoto = document.getElementById('btnNovaFoto');
+        const divResultado = document.getElementById('resultado');
+        const inputGabarito = document.getElementById('inputGabarito');
+        const inputSensibilidade = document.getElementById('inputSensibilidade');
+        const valorSensibilidade = document.getElementById('valorSensibilidade');
+
+        let streaming = false;
+        let opencvCarregado = false;
+        let stream = null;
+        let modoFotoTirada = false;
+        let loopMira = null;
+
+        // Atualiza o texto da porcentagem na tela quando você mexe no slider
+        inputSensibilidade.addEventListener('input', () => {
+            valorSensibilidade.innerText = Math.round(inputSensibilidade.value * 100) + "%";
+        });
+
+        function cvPronto() {
+            opencvCarregado = true;
+            btnCamera.innerText = "Ligar Câmera";
+            btnCamera.disabled = false;
+            btnCamera.classList.add('btn-start');
+        }
+
+        btnCamera.addEventListener('click', () => {
+            if (!streaming) iniciarCamera();
+            else pararCamera();
+        });
+
+        function iniciarCamera() {
+            divResultado.innerText = "Ligando câmera...";
+            let constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
+            
+            navigator.mediaDevices.getUserMedia(constraints)
+                .then(function(s) {
+                    stream = s;
+                    video.srcObject = stream;
+                    video.play().catch(e => console.error(e));
+                    aguardarLentePronta();
+                })
+                .catch(function(err) {
+                    divResultado.innerHTML = `<strong style="color:red;">Erro:</strong> ${err.message || err}`;
+                });
+        }
+
+        function aguardarLentePronta() {
+            if (streaming) return; 
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+                streaming = true;
+                btnCamera.innerText = "Desligar Câmera";
+                btnCamera.classList.remove('btn-start');
+                btnCamera.classList.add('btn-stop');
+                
+                divResultado.innerText = "Alinhe o gabarito e tire a foto!";
+                modoFotoTirada = false;
+                btnTirarFoto.style.display = "block";
+                btnNovaFoto.style.display = "none";
+                
+                desenharMira();
+            } else {
+                setTimeout(aguardarLentePronta, 100);
+            }
+        }
+
+        function pararCamera() {
+            streaming = false;
+            if (loopMira) cancelAnimationFrame(loopMira);
+            if (stream) stream.getTracks().forEach(track => track.stop());
+            
+            btnCamera.innerText = "Ligar Câmera";
+            btnCamera.classList.remove('btn-stop');
+            btnCamera.classList.add('btn-start');
+            btnTirarFoto.style.display = "none";
+            btnNovaFoto.style.display = "none";
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            divResultado.innerText = "Câmera parada.";
+        }
+
+        function desenharMira() {
+            if (!streaming || modoFotoTirada) return;
+
+            if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            let larguraPercentual = 0.85; 
+            let alturaPercentual = 0.65;  
+            let boxWidth = Math.floor(canvas.width * larguraPercentual);
+            let boxHeight = Math.floor(canvas.height * alturaPercentual);
+            let startX = Math.floor((canvas.width - boxWidth) / 2);
+            let startY = Math.floor((canvas.height - boxHeight) / 2);
+
+            ctx.strokeStyle = '#00FF00';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(startX, startY, boxWidth, boxHeight);
+
+            loopMira = requestAnimationFrame(desenharMira);
+        }
+
+        btnNovaFoto.addEventListener('click', () => {
+            modoFotoTirada = false;
+            btnTirarFoto.style.display = "block";
+            btnNovaFoto.style.display = "none";
+            divResultado.innerText = "Alinhe o gabarito e tire a foto!";
+            desenharMira();
+        });
+
+        btnTirarFoto.addEventListener('click', () => {
+            modoFotoTirada = true;
+            btnTirarFoto.style.display = "none";
+            divResultado.innerHTML = "<strong>Processando foto, aguarde...</strong>";
+            setTimeout(processarFotoCongelada, 50); 
+        });
+
+        function processarFotoCongelada() {
+            let src = null; let roiSrc = null; let gray = null; let blur = null; let thresh = null; 
+            let contours = null; let hierarchy = null; let kernelMorfologico = null;
+
+            // Pega o valor da barra que o usuário escolheu (Ex: 0.25)
+            let limiteDensidade = parseFloat(inputSensibilidade.value);
+
+            try {
+                src = cv.imread(canvas);
+                if (src.cols === 0 || src.rows === 0) throw new Error("Falha ao capturar foto.");
+
+                let larguraPercentual = 0.85; 
+                let alturaPercentual = 0.65;  
+                let boxWidth = Math.floor(src.cols * larguraPercentual);
+                let boxHeight = Math.floor(src.rows * alturaPercentual);
+                let startX = Math.floor((src.cols - boxWidth) / 2);
+                let startY = Math.floor((src.rows - boxHeight) / 2);
+
+                if (startX < 0) startX = 0; if (startY < 0) startY = 0;
+                if (startX + boxWidth > src.cols) boxWidth = src.cols - startX;
+                if (startY + boxHeight > src.rows) boxHeight = src.rows - startY;
+
+                let rectRoi = new cv.Rect(startX, startY, boxWidth, boxHeight);
+                roiSrc = src.roi(rectRoi); 
+                
+                gray = new cv.Mat(); blur = new cv.Mat(); thresh = new cv.Mat();
+
+                cv.cvtColor(roiSrc, gray, cv.COLOR_RGBA2GRAY, 0);
+                cv.GaussianBlur(gray, blur, new cv.Size(15, 15), 0, 0, cv.BORDER_DEFAULT);
+                cv.adaptiveThreshold(blur, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 51, 10);
+
+                kernelMorfologico = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+                cv.morphologyEx(thresh, thresh, cv.MORPH_CLOSE, kernelMorfologico);
+
+                contours = new cv.MatVector(); hierarchy = new cv.Mat();
+                cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                let manchasValidas = [];
+                let areaTotalCaixa = boxWidth * boxHeight;
+                let limiteAreaMinima = Math.max(150, areaTotalCaixa * 0.001); 
+                let limiteAreaMaxima = areaTotalCaixa * 0.10; 
+
+                for (let i = 0; i < contours.size(); ++i) {
+                    let cnt = contours.get(i);
+                    let area = cv.contourArea(cnt);
+                    
+                    if (area > limiteAreaMinima && area < limiteAreaMaxima) {
+                        let rect = cv.boundingRect(cnt);
+                        if (rect.width < 10 || rect.height < 10) continue;
+                        manchasValidas.push({ rect: rect, cx: rect.x + (rect.width / 2), cy: rect.y + (rect.height / 2) });
+                    }
+                }
+
+                manchasValidas.sort((a, b) => a.cy - b.cy);
+                let linhasY = [];
+                let limiteAgrupamento = (boxHeight / 11) * 0.6; 
+
+                manchasValidas.forEach(m => {
+                    if (linhasY.length === 0 || Math.abs(m.cy - linhasY[linhasY.length - 1]) > limiteAgrupamento) {
+                        linhasY.push(m.cy); 
+                    }
+                });
+
+                let folhaDeRespostas = {};
+                for (let q = 1; q <= 10; q++) folhaDeRespostas[q] = { 'NUMERO': 0, 'A': 0, 'B': 0, 'C': 0, 'D': 0 }; 
+
+                manchasValidas.forEach(m => {
+                    let indexLinha = 0; let menorDistancia = 9999;
+                    for (let l = 0; l < linhasY.length; l++) {
+                        let dist = Math.abs(m.cy - linhasY[l]);
+                        if (dist < menorDistancia) { menorDistancia = dist; indexLinha = l; }
+                    }
+
+                    let numeroQuestao = indexLinha + 1;
+                    m.questao = numeroQuestao;
+
+                    let indexColuna = Math.floor((m.cx / boxWidth) * 5);
+                    indexColuna = Math.min(Math.max(indexColuna, 0), 4);
+                    let tipoMancha = ['NUMERO', 'A', 'B', 'C', 'D'][indexColuna];
+                    m.letra = tipoMancha;
+
+                    if (numeroQuestao <= 10 && tipoMancha !== 'NUMERO') {
+                        let roiTinta = thresh.roi(m.rect);
+                        let totalTinta = cv.countNonZero(roiTinta);
+                        let areaDoQuadrado = m.rect.width * m.rect.height;
+                        
+                        let densidade = totalTinta / areaDoQuadrado;
+                        roiTinta.delete();
+
+                        if (densidade > folhaDeRespostas[numeroQuestao][tipoMancha]) {
+                            folhaDeRespostas[numeroQuestao][tipoMancha] = densidade;
+                        }
+                    }
+                });
+
+                let gabaritoOficial = inputGabarito.value.toUpperCase().replace(/[^A-D]/g, '').split('');
+                let modoCorrecao = gabaritoOficial.length > 0;
+                let htmlResultado = ``; let acertos = 0; let totalCorrigidas = 0;
+                let gabaritoMarcadoPeloAluno = {};
+
+                if (linhasY.length > 3) {
+                    for (let q = 1; q <= 10; q++) {
+                        let box = folhaDeRespostas[q];
+                        let densidadesAlt = { 'A': box['A'], 'B': box['B'], 'C': box['C'], 'D': box['D'] };
+                        let maiorDensidade = Math.max(...Object.values(densidadesAlt));
+                        
+                        gabaritoMarcadoPeloAluno[q] = [];
+
+                        // USA O VALOR DA BARRA AQUI:
+                        if (maiorDensidade < limiteDensidade) {
+                           htmlResultado += `<div class="res-item">Q${q}: <strong style="color: #aaa;">Em Branco</strong></div>`;
+                           continue;
+                        }
+
+                        // Considera marcada qualquer letra que passou da sensibilidade escolhida
+                        let letrasMarcadas = Object.keys(densidadesAlt).filter(l => densidadesAlt[l] >= limiteDensidade);
+                        letrasMarcadas.sort(); 
+                        gabaritoMarcadoPeloAluno[q] = letrasMarcadas;
+                        
+                        let textoResposta = letrasMarcadas.join(", ");
+                        let statusAvaliacao = "";
+                        
+                        if (modoCorrecao && gabaritoOficial[q - 1]) {
+                            totalCorrigidas++;
+                            let certa = gabaritoOficial[q - 1];
+                            if (letrasMarcadas.length === 1 && letrasMarcadas[0] === certa) {
+                                statusAvaliacao = `<span class="correto">✓ Acertou</span>`; acertos++;
+                            } else if (letrasMarcadas.length > 1) {
+                                statusAvaliacao = `<span class="anulada">⚠ Anulada (Era ${certa})</span>`;
+                            } else {
+                                statusAvaliacao = `<span class="errado">✗ Errou (Era ${certa})</span>`;
+                            }
+                        }
+                        htmlResultado += `<div class="res-item">Q${q}: <strong>${textoResposta}</strong> ${statusAvaliacao}</div>`;
+                    }
+
+                    if (modoCorrecao) {
+                        htmlResultado = `<div class="placar">Nota: ${acertos} / ${totalCorrigidas}</div>` + htmlResultado;
+                    }
+                    divResultado.innerHTML = htmlResultado;
+
+                    cv.rectangle(src, new cv.Point(startX, startY), new cv.Point(startX + boxWidth, startY + boxHeight), new cv.Scalar(255, 255, 255, 255), 2);
+                    
+                    manchasValidas.forEach(m => {
+                        if (m.questao > 10) return;
+                        let p1 = new cv.Point(m.rect.x + startX, m.rect.y + startY);
+                        let p2 = new cv.Point(m.rect.x + m.rect.width + startX, m.rect.y + m.rect.height + startY);
+
+                        if (m.letra === 'NUMERO') {
+                            cv.rectangle(src, p1, p2, new cv.Scalar(255, 100, 0, 255), 2);
+                        } else if (gabaritoMarcadoPeloAluno[m.questao] && gabaritoMarcadoPeloAluno[m.questao].includes(m.letra)) {
+                            cv.rectangle(src, p1, p2, new cv.Scalar(0, 255, 0, 255), 3);
+                        }
+                    });
+
+                } else {
+                    divResultado.innerHTML = "<strong style='color:#ffc107;'>Nenhuma marcação detectada.</strong><br>O gabarito ficou fora do quadrado verde ou a foto ficou tremida. Tente novamente.";
+                }
+
+                cv.imshow('canvas', src);
+                btnNovaFoto.style.display = "block";
+
+            } catch (err) {
+                console.error(err);
+                divResultado.innerHTML = `<strong style="color:red;">Erro ao ler a foto:</strong><br>${err.message}`;
+                btnNovaFoto.style.display = "block";
+            } finally {
+                if (src) src.delete(); if (roiSrc) roiSrc.delete(); if (gray) gray.delete(); 
+                if (blur) blur.delete(); if (thresh) thresh.delete(); if (contours) contours.delete(); 
+                if (hierarchy) hierarchy.delete(); if (kernelMorfologico) kernelMorfologico.delete();
+            }
+        }
+    </script>
+</body>
+</html>
