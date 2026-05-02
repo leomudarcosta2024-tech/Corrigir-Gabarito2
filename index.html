@@ -14,7 +14,6 @@
         .slider-container label { font-size: 14px; color: #ccc; display: flex; justify-content: space-between;}
         input[type=range] { width: 100%; margin-top: 8px; }
 
-        /* Estilo do Modo Raio-X */
         .toggle-container { margin-top: 15px; padding-top: 15px; border-top: 1px solid #555; text-align: left; padding-left: 5%; padding-right: 5%; display: flex; align-items: center; justify-content: space-between;}
         .toggle-container label { font-size: 14px; color: #00ff00; font-weight: bold; }
         input[type=checkbox] { transform: scale(1.5); }
@@ -100,10 +99,9 @@
         let modoFotoTirada = false;
         let loopMira = null;
 
-        // Variáveis para o Modo Raio-X
         let ultimoTempoRaioX = 0;
-        let retangulosRaioX = []; // Guarda as caixinhas detectadas na live
-        let calculandoRaioX = false; // Evita encavalar processos
+        let retangulosRaioX = []; 
+        let calculandoRaioX = false; 
 
         inputSensibilidade.addEventListener('input', () => {
             valorSensibilidade.innerText = Math.round(inputSensibilidade.value * 100) + "%";
@@ -179,10 +177,9 @@
                 canvas.height = video.videoHeight;
             }
 
-            // 1. Desenha a câmera normal
+            // 1. Desenha a câmera LIMPA (sem nenhuma marcação)
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // 2. Calcula as coordenadas do quadrado principal
             let larguraPercentual = 0.85; 
             let alturaPercentual = 0.65;  
             let boxWidth = Math.floor(canvas.width * larguraPercentual);
@@ -190,45 +187,44 @@
             let startX = Math.floor((canvas.width - boxWidth) / 2);
             let startY = Math.floor((canvas.height - boxHeight) / 2);
 
-            // 3. Desenha a mira verde
-            ctx.strokeStyle = '#00FF00';
-            ctx.lineWidth = 4;
-            ctx.strokeRect(startX, startY, boxWidth, boxHeight);
-
-            // 4. MODO RAIO-X AO VIVO
+            // 2. MODO RAIO-X: Captura a imagem limpa AGORA (antes de desenhar a mira verde)
             if (chkRaioX.checked) {
                 let agora = Date.now();
-                // Executa a leitura oculta a cada 250ms (4 vezes por segundo) para não travar
                 if (agora - ultimoTempoRaioX > 250 && !calculandoRaioX) {
                     ultimoTempoRaioX = agora;
-                    processarVisaoAoVivo(startX, startY, boxWidth, boxHeight);
+                    try {
+                        let srcLimpo = cv.imread(canvas);
+                        // Envia a imagem limpa para processar sem travar a tela
+                        setTimeout(() => processarVisaoAoVivo(srcLimpo, startX, startY, boxWidth, boxHeight), 0);
+                    } catch (e) {
+                        console.error("Erro ao ler tela:", e);
+                    }
                 }
 
-                // Desenha os retângulos azuis que o Raio-X achou
-                ctx.strokeStyle = '#00BFFF'; // Azul claro
+                // Desenha os quadradinhos azuis da última leitura
+                ctx.strokeStyle = '#00BFFF';
                 ctx.lineWidth = 2;
                 retangulosRaioX.forEach(r => {
                     ctx.strokeRect(r.x + startX, r.y + startY, r.width, r.height);
                 });
             } else {
-                retangulosRaioX = []; // Limpa se desligar
+                retangulosRaioX = [];
             }
+
+            // 3. SÓ AGORA desenha a mira verde (assim o robô não enxerga ela)
+            ctx.strokeStyle = '#00FF00';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(startX, startY, boxWidth, boxHeight);
 
             loopMira = requestAnimationFrame(desenharMira);
         }
 
-        // ========================================================
-        // FUNÇÃO QUE RODA EM SEGUNDO PLANO PARA O MODO RAIO-X
-        // ========================================================
-        function processarVisaoAoVivo(startX, startY, boxWidth, boxHeight) {
+        function processarVisaoAoVivo(src, startX, startY, boxWidth, boxHeight) {
             calculandoRaioX = true;
-            let src = null; let roiSrc = null; let gray = null; let blur = null; let thresh = null; 
+            let roiSrc = null; let gray = null; let blur = null; let thresh = null; 
             let contours = null; let hierarchy = null; let kernelMorfologico = null;
 
             try {
-                // Tira uma "foto invisível" do momento atual
-                src = cv.imread(canvas);
-                
                 if (startX < 0) startX = 0; if (startY < 0) startY = 0;
                 if (startX + boxWidth > src.cols) boxWidth = src.cols - startX;
                 if (startY + boxHeight > src.rows) boxHeight = src.rows - startY;
@@ -252,6 +248,7 @@
                 let areaTotalCaixa = boxWidth * boxHeight;
                 let limiteAreaMinima = Math.max(150, areaTotalCaixa * 0.001); 
                 let limiteAreaMaxima = areaTotalCaixa * 0.10; 
+                let limiteDensidade = parseFloat(inputSensibilidade.value);
 
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
@@ -259,38 +256,31 @@
                     
                     if (area > limiteAreaMinima && area < limiteAreaMaxima) {
                         let rect = cv.boundingRect(cnt);
-                        if (rect.width < 10 || rect.height < 10) continue;
-                        
-                        // No modo ao vivo, checamos a densidade de tudo para só marcar o que ele acha que é caneta
-                        let roiTinta = thresh.roi(rect);
-                        let densidade = cv.countNonZero(roiTinta) / (rect.width * rect.height);
-                        roiTinta.delete();
-
-                        let limiteDensidade = parseFloat(inputSensibilidade.value);
-                        
-                        // Só mostra o quadradinho azul se bater com a sensibilidade escolhida
-                        if (densidade >= limiteDensidade) {
-                            novosRetangulos.push(rect);
+                        if (rect.width >= 10 && rect.height >= 10) {
+                            let roiTinta = thresh.roi(rect);
+                            let densidade = cv.countNonZero(roiTinta) / (rect.width * rect.height);
+                            roiTinta.delete();
+                            
+                            if (densidade >= limiteDensidade) {
+                                novosRetangulos.push(rect);
+                            }
                         }
                     }
+                    cnt.delete(); // FIX: Impede que a memória encha e o app trave!
                 }
                 
-                // Atualiza a lista que a tela está desenhando
                 retangulosRaioX = novosRetangulos;
 
             } catch (err) {
-                // Ignora erros silenciosos no modo ao vivo para não quebrar a câmera
+                console.error("Erro RaioX:", err);
             } finally {
-                if (src) src.delete(); if (roiSrc) roiSrc.delete(); if (gray) gray.delete(); 
+                if (src) src.delete(); // Deleta a foto matriz enviada pela função principal
+                if (roiSrc) roiSrc.delete(); if (gray) gray.delete(); 
                 if (blur) blur.delete(); if (thresh) thresh.delete(); if (contours) contours.delete(); 
                 if (hierarchy) hierarchy.delete(); if (kernelMorfologico) kernelMorfologico.delete();
                 calculandoRaioX = false;
             }
         }
-
-        // ========================================================
-        // AÇÕES DOS BOTÕES DE FOTO
-        // ========================================================
 
         btnNovaFoto.addEventListener('click', () => {
             modoFotoTirada = false;
@@ -304,13 +294,14 @@
             modoFotoTirada = true;
             btnTirarFoto.style.display = "none";
             divResultado.innerHTML = "<strong>Processando foto, aguarde...</strong>";
-            retangulosRaioX = []; // Limpa o raio x pra foto final ficar limpa
+            
+            // Desenha uma tela PERFEITAMENTE LIMPA para a correção ser impecável
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            retangulosRaioX = []; 
+            
             setTimeout(processarFotoCongelada, 50); 
         });
 
-        // ========================================================
-        // PROCESSAMENTO FINAL (CONGELADO) - Igual a versão anterior
-        // ========================================================
         function processarFotoCongelada() {
             let src = null; let roiSrc = null; let gray = null; let blur = null; let thresh = null; 
             let contours = null; let hierarchy = null; let kernelMorfologico = null;
@@ -354,9 +345,11 @@
                     
                     if (area > limiteAreaMinima && area < limiteAreaMaxima) {
                         let rect = cv.boundingRect(cnt);
-                        if (rect.width < 10 || rect.height < 10) continue;
-                        manchasValidas.push({ rect: rect, cx: rect.x + (rect.width / 2), cy: rect.y + (rect.height / 2) });
+                        if (rect.width >= 10 && rect.height >= 10) {
+                            manchasValidas.push({ rect: rect, cx: rect.x + (rect.width / 2), cy: rect.y + (rect.height / 2) });
+                        }
                     }
+                    cnt.delete(); // Limpeza preventiva adicionada aqui também
                 }
 
                 manchasValidas.sort((a, b) => a.cy - b.cy);
