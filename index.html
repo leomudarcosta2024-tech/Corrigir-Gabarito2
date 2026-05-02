@@ -10,10 +10,14 @@
         #config-painel { background-color: #333; padding: 15px; border-radius: 8px; margin: 10px auto; max-width: 90%; }
         #inputGabarito { padding: 10px; font-size: 16px; border-radius: 4px; border: 1px solid #555; width: 80%; max-width: 250px; text-align: center; text-transform: uppercase; margin-bottom: 15px; }
         
-        /* Estilo da nova barra de sensibilidade */
-        .slider-container { margin-top: 10px; text-align: left; padding: 0 10%; }
+        .slider-container { margin-top: 10px; text-align: left; padding: 0 5%; }
         .slider-container label { font-size: 14px; color: #ccc; display: flex; justify-content: space-between;}
         input[type=range] { width: 100%; margin-top: 8px; }
+
+        /* Estilo do Modo Raio-X */
+        .toggle-container { margin-top: 15px; padding-top: 15px; border-top: 1px solid #555; text-align: left; padding-left: 5%; padding-right: 5%; display: flex; align-items: center; justify-content: space-between;}
+        .toggle-container label { font-size: 14px; color: #00ff00; font-weight: bold; }
+        input[type=checkbox] { transform: scale(1.5); }
 
         #video-container { position: relative; margin: 0 auto; width: 100%; max-width: 600px; }
         video { display: none; } 
@@ -51,6 +55,11 @@
             </label>
             <input type="range" id="inputSensibilidade" min="0.10" max="0.60" step="0.05" value="0.25">
         </div>
+
+        <div class="toggle-container">
+            <label for="chkRaioX">👁️ Visualizar marcações ao vivo</label>
+            <input type="checkbox" id="chkRaioX">
+        </div>
     </div>
 
     <p style="font-size: 14px; color: #ccc;">Aperte o botão quando o gabarito estiver no quadrado verde.</p>
@@ -83,6 +92,7 @@
         const inputGabarito = document.getElementById('inputGabarito');
         const inputSensibilidade = document.getElementById('inputSensibilidade');
         const valorSensibilidade = document.getElementById('valorSensibilidade');
+        const chkRaioX = document.getElementById('chkRaioX');
 
         let streaming = false;
         let opencvCarregado = false;
@@ -90,7 +100,11 @@
         let modoFotoTirada = false;
         let loopMira = null;
 
-        // Atualiza o texto da porcentagem na tela quando você mexe no slider
+        // Variáveis para o Modo Raio-X
+        let ultimoTempoRaioX = 0;
+        let retangulosRaioX = []; // Guarda as caixinhas detectadas na live
+        let calculandoRaioX = false; // Evita encavalar processos
+
         inputSensibilidade.addEventListener('input', () => {
             valorSensibilidade.innerText = Math.round(inputSensibilidade.value * 100) + "%";
         });
@@ -153,6 +167,7 @@
             btnTirarFoto.style.display = "none";
             btnNovaFoto.style.display = "none";
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            retangulosRaioX = [];
             divResultado.innerText = "Câmera parada.";
         }
 
@@ -164,8 +179,10 @@
                 canvas.height = video.videoHeight;
             }
 
+            // 1. Desenha a câmera normal
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+            // 2. Calcula as coordenadas do quadrado principal
             let larguraPercentual = 0.85; 
             let alturaPercentual = 0.65;  
             let boxWidth = Math.floor(canvas.width * larguraPercentual);
@@ -173,12 +190,107 @@
             let startX = Math.floor((canvas.width - boxWidth) / 2);
             let startY = Math.floor((canvas.height - boxHeight) / 2);
 
+            // 3. Desenha a mira verde
             ctx.strokeStyle = '#00FF00';
             ctx.lineWidth = 4;
             ctx.strokeRect(startX, startY, boxWidth, boxHeight);
 
+            // 4. MODO RAIO-X AO VIVO
+            if (chkRaioX.checked) {
+                let agora = Date.now();
+                // Executa a leitura oculta a cada 250ms (4 vezes por segundo) para não travar
+                if (agora - ultimoTempoRaioX > 250 && !calculandoRaioX) {
+                    ultimoTempoRaioX = agora;
+                    processarVisaoAoVivo(startX, startY, boxWidth, boxHeight);
+                }
+
+                // Desenha os retângulos azuis que o Raio-X achou
+                ctx.strokeStyle = '#00BFFF'; // Azul claro
+                ctx.lineWidth = 2;
+                retangulosRaioX.forEach(r => {
+                    ctx.strokeRect(r.x + startX, r.y + startY, r.width, r.height);
+                });
+            } else {
+                retangulosRaioX = []; // Limpa se desligar
+            }
+
             loopMira = requestAnimationFrame(desenharMira);
         }
+
+        // ========================================================
+        // FUNÇÃO QUE RODA EM SEGUNDO PLANO PARA O MODO RAIO-X
+        // ========================================================
+        function processarVisaoAoVivo(startX, startY, boxWidth, boxHeight) {
+            calculandoRaioX = true;
+            let src = null; let roiSrc = null; let gray = null; let blur = null; let thresh = null; 
+            let contours = null; let hierarchy = null; let kernelMorfologico = null;
+
+            try {
+                // Tira uma "foto invisível" do momento atual
+                src = cv.imread(canvas);
+                
+                if (startX < 0) startX = 0; if (startY < 0) startY = 0;
+                if (startX + boxWidth > src.cols) boxWidth = src.cols - startX;
+                if (startY + boxHeight > src.rows) boxHeight = src.rows - startY;
+
+                let rectRoi = new cv.Rect(startX, startY, boxWidth, boxHeight);
+                roiSrc = src.roi(rectRoi); 
+                
+                gray = new cv.Mat(); blur = new cv.Mat(); thresh = new cv.Mat();
+
+                cv.cvtColor(roiSrc, gray, cv.COLOR_RGBA2GRAY, 0);
+                cv.GaussianBlur(gray, blur, new cv.Size(15, 15), 0, 0, cv.BORDER_DEFAULT);
+                cv.adaptiveThreshold(blur, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 51, 10);
+
+                kernelMorfologico = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+                cv.morphologyEx(thresh, thresh, cv.MORPH_CLOSE, kernelMorfologico);
+
+                contours = new cv.MatVector(); hierarchy = new cv.Mat();
+                cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                let novosRetangulos = [];
+                let areaTotalCaixa = boxWidth * boxHeight;
+                let limiteAreaMinima = Math.max(150, areaTotalCaixa * 0.001); 
+                let limiteAreaMaxima = areaTotalCaixa * 0.10; 
+
+                for (let i = 0; i < contours.size(); ++i) {
+                    let cnt = contours.get(i);
+                    let area = cv.contourArea(cnt);
+                    
+                    if (area > limiteAreaMinima && area < limiteAreaMaxima) {
+                        let rect = cv.boundingRect(cnt);
+                        if (rect.width < 10 || rect.height < 10) continue;
+                        
+                        // No modo ao vivo, checamos a densidade de tudo para só marcar o que ele acha que é caneta
+                        let roiTinta = thresh.roi(rect);
+                        let densidade = cv.countNonZero(roiTinta) / (rect.width * rect.height);
+                        roiTinta.delete();
+
+                        let limiteDensidade = parseFloat(inputSensibilidade.value);
+                        
+                        // Só mostra o quadradinho azul se bater com a sensibilidade escolhida
+                        if (densidade >= limiteDensidade) {
+                            novosRetangulos.push(rect);
+                        }
+                    }
+                }
+                
+                // Atualiza a lista que a tela está desenhando
+                retangulosRaioX = novosRetangulos;
+
+            } catch (err) {
+                // Ignora erros silenciosos no modo ao vivo para não quebrar a câmera
+            } finally {
+                if (src) src.delete(); if (roiSrc) roiSrc.delete(); if (gray) gray.delete(); 
+                if (blur) blur.delete(); if (thresh) thresh.delete(); if (contours) contours.delete(); 
+                if (hierarchy) hierarchy.delete(); if (kernelMorfologico) kernelMorfologico.delete();
+                calculandoRaioX = false;
+            }
+        }
+
+        // ========================================================
+        // AÇÕES DOS BOTÕES DE FOTO
+        // ========================================================
 
         btnNovaFoto.addEventListener('click', () => {
             modoFotoTirada = false;
@@ -192,26 +304,25 @@
             modoFotoTirada = true;
             btnTirarFoto.style.display = "none";
             divResultado.innerHTML = "<strong>Processando foto, aguarde...</strong>";
+            retangulosRaioX = []; // Limpa o raio x pra foto final ficar limpa
             setTimeout(processarFotoCongelada, 50); 
         });
 
+        // ========================================================
+        // PROCESSAMENTO FINAL (CONGELADO) - Igual a versão anterior
+        // ========================================================
         function processarFotoCongelada() {
             let src = null; let roiSrc = null; let gray = null; let blur = null; let thresh = null; 
             let contours = null; let hierarchy = null; let kernelMorfologico = null;
-
-            // Pega o valor da barra que o usuário escolheu (Ex: 0.25)
             let limiteDensidade = parseFloat(inputSensibilidade.value);
 
             try {
                 src = cv.imread(canvas);
                 if (src.cols === 0 || src.rows === 0) throw new Error("Falha ao capturar foto.");
 
-                let larguraPercentual = 0.85; 
-                let alturaPercentual = 0.65;  
-                let boxWidth = Math.floor(src.cols * larguraPercentual);
-                let boxHeight = Math.floor(src.rows * alturaPercentual);
-                let startX = Math.floor((src.cols - boxWidth) / 2);
-                let startY = Math.floor((src.rows - boxHeight) / 2);
+                let larguraPercentual = 0.85; let alturaPercentual = 0.65;  
+                let boxWidth = Math.floor(src.cols * larguraPercentual); let boxHeight = Math.floor(src.rows * alturaPercentual);
+                let startX = Math.floor((src.cols - boxWidth) / 2); let startY = Math.floor((src.rows - boxHeight) / 2);
 
                 if (startX < 0) startX = 0; if (startY < 0) startY = 0;
                 if (startX + boxWidth > src.cols) boxWidth = src.cols - startX;
@@ -303,13 +414,11 @@
                         
                         gabaritoMarcadoPeloAluno[q] = [];
 
-                        // USA O VALOR DA BARRA AQUI:
                         if (maiorDensidade < limiteDensidade) {
                            htmlResultado += `<div class="res-item">Q${q}: <strong style="color: #aaa;">Em Branco</strong></div>`;
                            continue;
                         }
 
-                        // Considera marcada qualquer letra que passou da sensibilidade escolhida
                         let letrasMarcadas = Object.keys(densidadesAlt).filter(l => densidadesAlt[l] >= limiteDensidade);
                         letrasMarcadas.sort(); 
                         gabaritoMarcadoPeloAluno[q] = letrasMarcadas;
